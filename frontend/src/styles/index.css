@@ -1,0 +1,100 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color: #1b1e28;
+  background-color: #f4f6f8;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at 10% 8%, rgba(14, 159, 154, 0.09), transparent 22%),
+    radial-gradient(circle at 90% 12%, rgba(246, 126, 95, 0.1), transparent 20%),
+    linear-gradient(180deg, #f8fbff 0%, #f3f6fb 45%, #f7f9fc 100%);
+}
+
+a {
+  text-decoration: none;
+}
+
+@keyframes fadeUp {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes floatCard {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-3px);
+  }
+}
+
+@keyframes pageIn {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes glow {
+  0%,
+  100% {
+    opacity: 0.55;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.8;
+    transform: scale(1.06);
+  }
+}
+
+.animate-fade-up {
+  animation: fadeUp 520ms ease-out both;
+}
+
+.animate-fade-up-delayed {
+  animation: fadeUp 620ms ease-out 80ms both;
+}
+
+.animate-fade-up-delayed-2 {
+  animation: fadeUp 680ms ease-out 140ms both;
+}
+
+.animate-float {
+  animation: floatCard 4s ease-in-out infinite;
+}
+
+.animate-page-in {
+  animation: pageIn 520ms ease-out both;
+}
+
+.animate-glow {
+  animation: glow 6s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-fade-up,
+  .animate-fade-up-delayed,
+  .animate-fade-up-delayed-2,
+  .animate-float,
+  .animate-page-in,
+  .animate-glow {
+    animation: none !important;
+  }
+}
