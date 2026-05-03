@@ -60,3 +60,8 @@ export async function cancelMission(missionId) {
   const { data } = await apiClient.post(`/missions/${missionId}/cancel/`)
   return data
 }
+
+export async function getAdvancedHungerRoute(payload) {
+  const { data } = await apiClient.post('/missions/hunger-routing-advanced/', payload)
+  return data
+}

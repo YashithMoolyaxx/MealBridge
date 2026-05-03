@@ -9,6 +9,7 @@ import {
   approveVolunteerRequest,
   cancelMission,
   getMission,
+  getAdvancedHungerRoute,
   listMissions,
   rejectDelivery,
   rejectVolunteerRequest,
@@ -34,6 +35,15 @@ const KARMA_TIERS = [
   { maxKg: Infinity, donor: 20, volunteer: 35, receiver: 10 },
 ]
 
+const ROUTING_ALGORITHMS = [
+  { value: 'compare', label: 'Compare all algorithms' },
+  { value: 'astar', label: 'A* shortest path' },
+  { value: 'pareto', label: 'Pareto frontier' },
+  { value: 'annealing', label: 'Simulated annealing' },
+]
+
+const ROUTING_READY_STATES = ['CREATED', 'REQUESTED', 'VOLUNTEER_ASSIGNED']
+
 function estimateKg(quantity, unit) {
   const qty = Number(quantity) || 0
   const unitText = (unit || '').toLowerCase()
@@ -46,6 +56,27 @@ function estimateKg(quantity, unit) {
 
 function getKarmaForKg(kg) {
   return KARMA_TIERS.find((tier) => kg <= tier.maxKg) || KARMA_TIERS[KARMA_TIERS.length - 1]
+}
+
+function isRoutingCandidate(mission) {
+  return Boolean(mission?.donation_card) && ROUTING_READY_STATES.includes(mission.state)
+}
+
+function formatRoutingError(err) {
+  const payload = err?.response?.data
+  if (typeof payload === 'string') return payload
+  if (payload?.detail) return payload.detail
+  if (payload?.volunteer_address) return payload.volunteer_address
+  if (payload?.algorithm) return payload.algorithm
+  if (payload?.donation_ids) return payload.donation_ids
+  return 'Unable to generate smart route.'
+}
+
+function getRouteTone(algorithm) {
+  if (algorithm === 'astar') return 'border-accent/30 bg-bloom/50'
+  if (algorithm === 'pareto') return 'border-warning/30 bg-sunrise/35'
+  if (algorithm === 'annealing') return 'border-success/30 bg-success/5'
+  return 'border-line bg-white'
 }
 
 function VolunteerMissionsPage() {
@@ -67,6 +98,12 @@ function VolunteerMissionsPage() {
   const [confirmMission, setConfirmMission] = useState(null)
   const [removingId, setRemovingId] = useState('')
   const [toast, setToast] = useState('')
+  const [selectedRouteMissionIds, setSelectedRouteMissionIds] = useState([])
+  const [routingAlgorithm, setRoutingAlgorithm] = useState('compare')
+  const [routingAddress, setRoutingAddress] = useState('')
+  const [routingLoading, setRoutingLoading] = useState(false)
+  const [routingError, setRoutingError] = useState('')
+  const [routingResult, setRoutingResult] = useState(null)
   const [, setTicker] = useState(0)
 
   useEffect(() => {
@@ -86,6 +123,20 @@ function VolunteerMissionsPage() {
     const timer = setTimeout(() => setToast(''), 2600)
     return () => clearTimeout(timer)
   }, [toast])
+
+  useEffect(() => {
+    if (user?.role !== 'VOLUNTEER') return
+    const availableIds = missions.filter(isRoutingCandidate).map((mission) => mission.id)
+    setSelectedRouteMissionIds((prev) => {
+      const stillVisible = prev.filter((missionId) => availableIds.includes(missionId))
+      if (stillVisible.length) return stillVisible
+      return availableIds.slice(0, 4)
+    })
+    if (!availableIds.length) {
+      setRoutingResult(null)
+      setRoutingError('')
+    }
+  }, [missions, user?.role])
 
   const openModal = async (missionId) => {
     setModalOpen(true)
@@ -214,10 +265,57 @@ function VolunteerMissionsPage() {
     }
   }
 
+  const toggleRouteMission = (missionId) => {
+    setSelectedRouteMissionIds((prev) =>
+      prev.includes(missionId) ? prev.filter((item) => item !== missionId) : [...prev, missionId]
+    )
+  }
+
+  const selectAllRouteMissions = () => {
+    setSelectedRouteMissionIds(missions.filter(isRoutingCandidate).map((mission) => mission.id))
+  }
+
+  const clearRouteSelection = () => {
+    setSelectedRouteMissionIds([])
+    setRoutingResult(null)
+    setRoutingError('')
+  }
+
+  const runSmartRoute = async () => {
+    const selectedMissions = missions.filter((mission) => selectedRouteMissionIds.includes(mission.id))
+    const donationIds = [...new Set(selectedMissions.map((mission) => mission.donation_card).filter(Boolean))]
+
+    if (!donationIds.length) {
+      setRoutingError('Select at least one mission with a donation card.')
+      setRoutingResult(null)
+      return
+    }
+
+    setRoutingLoading(true)
+    setRoutingError('')
+    try {
+      const payload = {
+        algorithm: routingAlgorithm,
+        donation_ids: donationIds,
+      }
+      if (routingAddress.trim()) {
+        payload.volunteer_address = routingAddress.trim()
+      }
+      const response = await getAdvancedHungerRoute(payload)
+      setRoutingResult(response)
+    } catch (err) {
+      setRoutingResult(null)
+      setRoutingError(formatRoutingError(err))
+    } finally {
+      setRoutingLoading(false)
+    }
+  }
+
   const pickupQrToken = selectedMission?.qr_tokens?.find((token) => token.qr_type === 'PICKUP' && token.is_active)
   const pickupQrUrl = pickupQrToken
     ? `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(pickupQrToken.token)}`
     : ''
+  const routeCandidates = missions.filter(isRoutingCandidate)
 
   return (
     <div className="space-y-4">
@@ -225,6 +323,219 @@ function VolunteerMissionsPage() {
       <p className="text-sm text-slate">
         {getDisplayName(user)}, these are your active and historical missions with real-time expiry countdown.
       </p>
+
+      {user?.role === 'VOLUNTEER' ? (
+        <Panel className="overflow-hidden border border-line/80 bg-white">
+          <div className="relative">
+            <div className="absolute inset-x-0 top-0 h-24 bg-[radial-gradient(circle_at_top_left,_rgba(15,118,110,0.18),_transparent_55%),radial-gradient(circle_at_top_right,_rgba(251,191,36,0.18),_transparent_50%)]" />
+            <div className="relative space-y-4">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <p className="text-xs uppercase tracking-[0.18em] text-slate">Hunger-Aware Routing</p>
+                  <h3 className="mt-1 text-xl font-semibold text-ink">Plan the next pickup run from the volunteer view</h3>
+                  <p className="mt-2 max-w-2xl text-sm text-slate">
+                    Pick missions, choose an algorithm, and compare distance against hunger urgency without leaving the app.
+                  </p>
+                </div>
+                <div className="rounded-soft border border-line/70 bg-cloud/70 px-3 py-2 text-right">
+                  <p className="text-xs uppercase tracking-[0.14em] text-slate">Route-ready missions</p>
+                  <p className="mt-1 text-lg font-semibold text-ink">{routeCandidates.length}</p>
+                </div>
+              </div>
+
+              <div className="grid gap-3 lg:grid-cols-[1.25fr_0.95fr]">
+                <div className="rounded-soft border border-line/70 bg-cloud/55 p-4">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p className="text-sm font-semibold text-ink">Select missions for this pickup batch</p>
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        onClick={selectAllRouteMissions}
+                        type="button"
+                        className="rounded-full border border-line bg-white px-3 py-1 text-xs font-semibold text-ink"
+                      >
+                        Select all
+                      </button>
+                      <button
+                        onClick={clearRouteSelection}
+                        type="button"
+                        className="rounded-full border border-line bg-white px-3 py-1 text-xs font-semibold text-slate"
+                      >
+                        Clear
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="mt-3 space-y-2">
+                    {routeCandidates.length === 0 ? (
+                      <p className="rounded-soft border border-dashed border-line bg-white px-4 py-3 text-sm text-slate">
+                        No pickup-ready missions yet. Create or request a donation mission first.
+                      </p>
+                    ) : (
+                      routeCandidates.map((mission) => {
+                        const checked = selectedRouteMissionIds.includes(mission.id)
+                        return (
+                          <label
+                            key={mission.id}
+                            className={`flex cursor-pointer items-start gap-3 rounded-soft border px-3 py-3 transition ${
+                              checked ? 'border-accent bg-bloom/60 shadow-card' : 'border-line bg-white'
+                            }`}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={() => toggleRouteMission(mission.id)}
+                              className="mt-1 h-4 w-4 rounded border-line text-accent focus:ring-accent"
+                            />
+                            <div className="min-w-0 flex-1">
+                              <div className="flex flex-wrap items-center justify-between gap-2">
+                                <p className="text-sm font-semibold text-ink">
+                                  {mission.donation_food_title || 'Food Mission'}
+                                </p>
+                                <span className="rounded-full bg-white px-2 py-1 text-[11px] font-semibold text-slate">
+                                  {formatMissionState(mission.state)}
+                                </span>
+                              </div>
+                              <p className="mt-1 text-xs font-semibold text-accent">
+                                Donated by {mission.donor_name || 'Donor'}
+                              </p>
+                              <p className="mt-1 text-xs text-slate">{mission.pickup_address}</p>
+                              <p className="mt-1 text-[11px] text-slate">
+                                Receiver: {mission.receiver_name || 'Not assigned yet'}
+                              </p>
+                            </div>
+                          </label>
+                        )
+                      })
+                    )}
+                  </div>
+                </div>
+
+                <div className="rounded-soft border border-line/70 bg-white p-4">
+                  <div className="grid gap-3">
+                    <div>
+                      <label className="text-xs uppercase tracking-[0.16em] text-slate">Algorithm</label>
+                      <select
+                        value={routingAlgorithm}
+                        onChange={(event) => setRoutingAlgorithm(event.target.value)}
+                        className="mt-2 w-full rounded-soft border border-line bg-cloud/70 px-4 py-3 text-sm text-ink outline-none focus:border-accent"
+                      >
+                        {ROUTING_ALGORITHMS.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="text-xs uppercase tracking-[0.16em] text-slate">Volunteer start address override</label>
+                      <input
+                        type="text"
+                        value={routingAddress}
+                        onChange={(event) => setRoutingAddress(event.target.value)}
+                        placeholder="Optional, for example Andheri East, Mumbai"
+                        className="mt-2 w-full rounded-soft border border-line bg-cloud/70 px-4 py-3 text-sm text-ink outline-none placeholder:text-slate focus:border-accent"
+                      />
+                      <p className="mt-2 text-xs text-slate">
+                        Leave blank to use the volunteer&apos;s saved location. Add an address if that location is missing.
+                      </p>
+                    </div>
+
+                    <button
+                      onClick={runSmartRoute}
+                      type="button"
+                      disabled={routingLoading || routeCandidates.length === 0}
+                      className="rounded-soft bg-gradient-to-r from-accent to-ink px-4 py-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {routingLoading ? 'Planning route...' : 'Run smart route'}
+                    </button>
+
+                    {routingError ? <p className="text-sm font-semibold text-danger">{routingError}</p> : null}
+                    {routingResult?.start_location ? (
+                      <div className="rounded-soft border border-line/70 bg-cloud/60 px-3 py-3 text-sm text-slate">
+                        Starting from {routingResult.start_location.latitude}, {routingResult.start_location.longitude} using{' '}
+                        {routingResult.start_location.source === 'address_override' ? 'your typed address' : 'saved volunteer location'}.
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+              </div>
+
+              {routingResult?.routes?.length ? (
+                <div className="space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <p className="text-xs uppercase tracking-[0.16em] text-slate">Route output</p>
+                      <h4 className="mt-1 text-lg font-semibold text-ink">User-facing routing results</h4>
+                    </div>
+                    <p className="text-sm text-slate">
+                      {routingResult.skipped_donations?.length ? `${routingResult.skipped_donations.length} mission(s) skipped due to missing coordinates.` : 'No missions were skipped.'}
+                    </p>
+                  </div>
+
+                  <div className="grid gap-3 xl:grid-cols-2">
+                    {routingResult.routes.map((route, index) => (
+                      <div key={`${route.algorithm}-${index}`} className={`rounded-soft border p-4 ${getRouteTone(route.algorithm)}`}>
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div>
+                            <p className="text-xs uppercase tracking-[0.16em] text-slate">{route.algorithm}</p>
+                            <h5 className="mt-1 text-lg font-semibold text-ink">
+                              {ROUTING_ALGORITHMS.find((item) => item.value === route.algorithm)?.label || route.algorithm}
+                            </h5>
+                          </div>
+                          <div className="flex flex-wrap gap-2 text-xs font-semibold">
+                            <span className="rounded-full bg-white px-3 py-1 text-slate">
+                              Distance {route.total_distance_km} km
+                            </span>
+                            <span className="rounded-full bg-white px-3 py-1 text-slate">
+                              Hunger {route.total_hunger_score}
+                            </span>
+                          </div>
+                        </div>
+
+                        <div className="mt-4 space-y-2">
+                          {route.route_steps?.map((step, stepIndex) => {
+                            const linkedMission = missions.find((mission) => mission.donation_card === step.donation_id)
+                            return (
+                              <div key={`${route.algorithm}-${step.donation_id}-${stepIndex}`} className="rounded-soft border border-line/70 bg-white/90 px-3 py-3">
+                                <div className="flex flex-wrap items-start justify-between gap-3">
+                                  <div className="flex items-start gap-3">
+                                    <div className="flex h-8 w-8 items-center justify-center rounded-full bg-ink text-xs font-semibold text-white">
+                                      {stepIndex + 1}
+                                    </div>
+                                    <div>
+                                      <p className="text-sm font-semibold text-ink">{step.food_title || 'Mission pickup'}</p>
+                                      <p className="mt-1 text-xs font-semibold text-accent">
+                                        Receiver: {step.receiver_name || 'Not assigned yet'}
+                                      </p>
+                                      <p className="mt-1 text-xs text-slate">
+                                        +{step.distance_from_previous_km} km from previous stop · cumulative {step.cumulative_distance_km} km
+                                      </p>
+                                      <p className="mt-1 text-xs text-slate">Hunger score {step.hunger_score}</p>
+                                    </div>
+                                  </div>
+                                  {linkedMission ? (
+                                    <Link
+                                      to={`/app/missions/${linkedMission.id}`}
+                                      className="rounded-full border border-line bg-white px-3 py-1 text-xs font-semibold text-ink"
+                                    >
+                                      Open mission
+                                    </Link>
+                                  ) : null}
+                                </div>
+                              </div>
+                            )
+                          })}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          </div>
+        </Panel>
+      ) : null}
 
       {loading ? <Panel>Loading missions...</Panel> : null}
       {error ? <Panel>{error}</Panel> : null}
