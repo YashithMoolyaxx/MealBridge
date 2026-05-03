@@ -35,14 +35,8 @@ const KARMA_TIERS = [
   { maxKg: Infinity, donor: 20, volunteer: 35, receiver: 10 },
 ]
 
-const ROUTING_ALGORITHMS = [
-  { value: 'compare', label: 'Compare all algorithms' },
-  { value: 'astar', label: 'A* shortest path' },
-  { value: 'pareto', label: 'Pareto frontier' },
-  { value: 'annealing', label: 'Simulated annealing' },
-]
-
 const ROUTING_READY_STATES = ['CREATED', 'REQUESTED', 'VOLUNTEER_ASSIGNED']
+const RELIABLE_ROUTE_DISTANCE_MARGIN = 0.05
 
 function estimateKg(quantity, unit) {
   const qty = Number(quantity) || 0
@@ -65,18 +59,89 @@ function isRoutingCandidate(mission) {
 function formatRoutingError(err) {
   const payload = err?.response?.data
   if (typeof payload === 'string') return payload
+  if (Array.isArray(payload)) return payload.filter(Boolean).join(' ')
   if (payload?.detail) return payload.detail
+  if (Array.isArray(payload?.detail)) return payload.detail.filter(Boolean).join(' ')
+  if (Array.isArray(payload?.volunteer_address)) return payload.volunteer_address.filter(Boolean).join(' ')
+  if (Array.isArray(payload?.algorithm)) return payload.algorithm.filter(Boolean).join(' ')
+  if (Array.isArray(payload?.donation_ids)) return payload.donation_ids.filter(Boolean).join(' ')
   if (payload?.volunteer_address) return payload.volunteer_address
   if (payload?.algorithm) return payload.algorithm
   if (payload?.donation_ids) return payload.donation_ids
   return 'Unable to generate smart route.'
 }
 
-function getRouteTone(algorithm) {
-  if (algorithm === 'astar') return 'border-accent/30 bg-bloom/50'
-  if (algorithm === 'pareto') return 'border-warning/30 bg-sunrise/35'
-  if (algorithm === 'annealing') return 'border-success/30 bg-success/5'
-  return 'border-line bg-white'
+function toNumber(value) {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : 0
+}
+
+function formatDistanceKm(value) {
+  return `${toNumber(value).toFixed(2)} km`
+}
+
+function formatUrgency(value) {
+  return toNumber(value).toFixed(2)
+}
+
+function pickRecommendedRoute(routes = []) {
+  if (!Array.isArray(routes) || routes.length === 0) return null
+
+  const grouped = new Map()
+  for (const route of routes) {
+    const key = (route?.ordered_donation_ids || []).join('|')
+    const existing = grouped.get(key)
+    if (existing) {
+      existing.supportCount += 1
+      existing.algorithms.add(route.algorithm || 'route-check')
+      existing.totalHungerScore = Math.max(existing.totalHungerScore, toNumber(route.total_hunger_score))
+      existing.totalDistanceKm = Math.min(existing.totalDistanceKm, toNumber(route.total_distance_km))
+    } else {
+      grouped.set(key, {
+        route,
+        supportCount: 1,
+        algorithms: new Set([route?.algorithm || 'route-check']),
+        totalDistanceKm: toNumber(route?.total_distance_km),
+        totalHungerScore: toNumber(route?.total_hunger_score),
+      })
+    }
+  }
+
+  const candidates = [...grouped.values()]
+  const shortestDistance = Math.min(...candidates.map((candidate) => candidate.totalDistanceKm))
+
+  candidates.sort((left, right) => {
+    if (right.supportCount !== left.supportCount) return right.supportCount - left.supportCount
+
+    const leftCloseToBest = left.totalDistanceKm <= shortestDistance * (1 + RELIABLE_ROUTE_DISTANCE_MARGIN)
+    const rightCloseToBest = right.totalDistanceKm <= shortestDistance * (1 + RELIABLE_ROUTE_DISTANCE_MARGIN)
+    if (leftCloseToBest !== rightCloseToBest) return rightCloseToBest - leftCloseToBest
+
+    if (left.totalDistanceKm !== right.totalDistanceKm) return left.totalDistanceKm - right.totalDistanceKm
+    return right.totalHungerScore - left.totalHungerScore
+  })
+
+  const winner = candidates[0]
+  if (!winner) return null
+
+  return {
+    ...winner.route,
+    supportCount: winner.supportCount,
+    comparedRouteCount: routes.length,
+    agreementRatio: routes.length ? winner.supportCount / routes.length : 0,
+    algorithmSupport: [...winner.algorithms],
+  }
+}
+
+function describeRecommendation(route) {
+  if (!route) return ''
+  if (route.supportCount === route.comparedRouteCount) {
+    return 'Every route check agreed on this pickup order, so this is the most reliable run to follow.'
+  }
+  if (route.supportCount > 1) {
+    return `Most route checks agreed on this order, balancing urgency and travel time for a dependable run.`
+  }
+  return 'MealBridge selected the strongest route by balancing urgency and travel distance behind the scenes.'
 }
 
 function VolunteerMissionsPage() {
@@ -99,7 +164,6 @@ function VolunteerMissionsPage() {
   const [removingId, setRemovingId] = useState('')
   const [toast, setToast] = useState('')
   const [selectedRouteMissionIds, setSelectedRouteMissionIds] = useState([])
-  const [routingAlgorithm, setRoutingAlgorithm] = useState('compare')
   const [routingAddress, setRoutingAddress] = useState('')
   const [routingLoading, setRoutingLoading] = useState(false)
   const [routingError, setRoutingError] = useState('')
@@ -295,7 +359,7 @@ function VolunteerMissionsPage() {
     setRoutingError('')
     try {
       const payload = {
-        algorithm: routingAlgorithm,
+        algorithm: 'compare',
         donation_ids: donationIds,
       }
       if (routingAddress.trim()) {
@@ -316,6 +380,8 @@ function VolunteerMissionsPage() {
     ? `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(pickupQrToken.token)}`
     : ''
   const routeCandidates = missions.filter(isRoutingCandidate)
+  const recommendedRoute = pickRecommendedRoute(routingResult?.routes)
+  const skippedCount = routingResult?.skipped_donations?.length || 0
 
   return (
     <div className="space-y-4">
@@ -334,7 +400,7 @@ function VolunteerMissionsPage() {
                   <p className="text-xs uppercase tracking-[0.18em] text-slate">Hunger-Aware Routing</p>
                   <h3 className="mt-1 text-xl font-semibold text-ink">Plan the next pickup run from the volunteer view</h3>
                   <p className="mt-2 max-w-2xl text-sm text-slate">
-                    Pick missions, choose an algorithm, and compare distance against hunger urgency without leaving the app.
+                    Pick missions and let MealBridge combine multiple route checks behind the scenes to recommend one reliable pickup plan.
                   </p>
                 </div>
                 <div className="rounded-soft border border-line/70 bg-cloud/70 px-3 py-2 text-right">
@@ -412,19 +478,8 @@ function VolunteerMissionsPage() {
 
                 <div className="rounded-soft border border-line/70 bg-white p-4">
                   <div className="grid gap-3">
-                    <div>
-                      <label className="text-xs uppercase tracking-[0.16em] text-slate">Algorithm</label>
-                      <select
-                        value={routingAlgorithm}
-                        onChange={(event) => setRoutingAlgorithm(event.target.value)}
-                        className="mt-2 w-full rounded-soft border border-line bg-cloud/70 px-4 py-3 text-sm text-ink outline-none focus:border-accent"
-                      >
-                        {ROUTING_ALGORITHMS.map((option) => (
-                          <option key={option.value} value={option.value}>
-                            {option.label}
-                          </option>
-                        ))}
-                      </select>
+                    <div className="rounded-soft border border-line/70 bg-cloud/60 px-4 py-3 text-sm text-slate">
+                      MealBridge quietly compares multiple routing strategies and shows one dependable route recommendation here for volunteers.
                     </div>
 
                     <div>
@@ -447,88 +502,88 @@ function VolunteerMissionsPage() {
                       disabled={routingLoading || routeCandidates.length === 0}
                       className="rounded-soft bg-gradient-to-r from-accent to-ink px-4 py-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
                     >
-                      {routingLoading ? 'Planning route...' : 'Run smart route'}
+                      {routingLoading ? 'Building best route...' : 'Build best pickup plan'}
                     </button>
 
                     {routingError ? <p className="text-sm font-semibold text-danger">{routingError}</p> : null}
                     {routingResult?.start_location ? (
                       <div className="rounded-soft border border-line/70 bg-cloud/60 px-3 py-3 text-sm text-slate">
-                        Starting from {routingResult.start_location.latitude}, {routingResult.start_location.longitude} using{' '}
-                        {routingResult.start_location.source === 'address_override' ? 'your typed address' : 'saved volunteer location'}.
+                        {routingResult.start_location.source === 'address_override'
+                          ? `Starting from ${routingAddress.trim()}.`
+                          : 'Using the volunteer’s saved start location.'}
                       </div>
                     ) : null}
                   </div>
                 </div>
               </div>
 
-              {routingResult?.routes?.length ? (
+              {recommendedRoute ? (
                 <div className="space-y-3">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div>
-                      <p className="text-xs uppercase tracking-[0.16em] text-slate">Route output</p>
-                      <h4 className="mt-1 text-lg font-semibold text-ink">User-facing routing results</h4>
+                      <p className="text-xs uppercase tracking-[0.16em] text-slate">Smart route</p>
+                      <h4 className="mt-1 text-lg font-semibold text-ink">Recommended pickup plan</h4>
+                      <p className="mt-2 max-w-2xl text-sm text-slate">{describeRecommendation(recommendedRoute)}</p>
                     </div>
                     <p className="text-sm text-slate">
-                      {routingResult.skipped_donations?.length ? `${routingResult.skipped_donations.length} mission(s) skipped due to missing coordinates.` : 'No missions were skipped.'}
+                      {skippedCount ? `${skippedCount} mission(s) skipped because location data was missing.` : 'All selected missions were included.'}
                     </p>
                   </div>
 
-                  <div className="grid gap-3 xl:grid-cols-2">
-                    {routingResult.routes.map((route, index) => (
-                      <div key={`${route.algorithm}-${index}`} className={`rounded-soft border p-4 ${getRouteTone(route.algorithm)}`}>
-                        <div className="flex flex-wrap items-start justify-between gap-3">
-                          <div>
-                            <p className="text-xs uppercase tracking-[0.16em] text-slate">{route.algorithm}</p>
-                            <h5 className="mt-1 text-lg font-semibold text-ink">
-                              {ROUTING_ALGORITHMS.find((item) => item.value === route.algorithm)?.label || route.algorithm}
-                            </h5>
-                          </div>
-                          <div className="flex flex-wrap gap-2 text-xs font-semibold">
-                            <span className="rounded-full bg-white px-3 py-1 text-slate">
-                              Distance {route.total_distance_km} km
-                            </span>
-                            <span className="rounded-full bg-white px-3 py-1 text-slate">
-                              Hunger {route.total_hunger_score}
-                            </span>
-                          </div>
-                        </div>
+                  <div className="rounded-soft border border-success/40 bg-success/5 p-4 shadow-card">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div>
+                        <p className="text-xs uppercase tracking-[0.16em] text-success">Best route ready</p>
+                        <h5 className="mt-1 text-lg font-semibold text-ink">Follow this pickup order</h5>
+                      </div>
+                      <div className="flex flex-wrap gap-2 text-xs font-semibold">
+                        <span className="rounded-full bg-white px-3 py-1 text-slate">
+                          Distance {formatDistanceKm(recommendedRoute.total_distance_km)}
+                        </span>
+                        <span className="rounded-full bg-white px-3 py-1 text-slate">
+                          Priority {formatUrgency(recommendedRoute.total_hunger_score)}
+                        </span>
+                        <span className="rounded-full bg-white px-3 py-1 text-slate">
+                          Stops {recommendedRoute.route_steps?.length || 0}
+                        </span>
+                      </div>
+                    </div>
 
-                        <div className="mt-4 space-y-2">
-                          {route.route_steps?.map((step, stepIndex) => {
-                            const linkedMission = missions.find((mission) => mission.donation_card === step.donation_id)
-                            return (
-                              <div key={`${route.algorithm}-${step.donation_id}-${stepIndex}`} className="rounded-soft border border-line/70 bg-white/90 px-3 py-3">
-                                <div className="flex flex-wrap items-start justify-between gap-3">
-                                  <div className="flex items-start gap-3">
-                                    <div className="flex h-8 w-8 items-center justify-center rounded-full bg-ink text-xs font-semibold text-white">
-                                      {stepIndex + 1}
-                                    </div>
-                                    <div>
-                                      <p className="text-sm font-semibold text-ink">{step.food_title || 'Mission pickup'}</p>
-                                      <p className="mt-1 text-xs font-semibold text-accent">
-                                        Receiver: {step.receiver_name || 'Not assigned yet'}
-                                      </p>
-                                      <p className="mt-1 text-xs text-slate">
-                                        +{step.distance_from_previous_km} km from previous stop · cumulative {step.cumulative_distance_km} km
-                                      </p>
-                                      <p className="mt-1 text-xs text-slate">Hunger score {step.hunger_score}</p>
-                                    </div>
-                                  </div>
-                                  {linkedMission ? (
-                                    <Link
-                                      to={`/app/missions/${linkedMission.id}`}
-                                      className="rounded-full border border-line bg-white px-3 py-1 text-xs font-semibold text-ink"
-                                    >
-                                      Open mission
-                                    </Link>
-                                  ) : null}
+                    <div className="mt-4 space-y-2">
+                      {recommendedRoute.route_steps?.map((step, stepIndex) => {
+                        const linkedMission = missions.find((mission) => mission.donation_card === step.donation_id)
+                        return (
+                          <div key={`${step.donation_id}-${stepIndex}`} className="rounded-soft border border-line/70 bg-white/95 px-3 py-3">
+                            <div className="flex flex-wrap items-start justify-between gap-3">
+                              <div className="flex items-start gap-3">
+                                <div className="flex h-8 w-8 items-center justify-center rounded-full bg-ink text-xs font-semibold text-white">
+                                  {stepIndex + 1}
+                                </div>
+                                <div>
+                                  <p className="text-sm font-semibold text-ink">{step.food_title || 'Mission pickup'}</p>
+                                  <p className="mt-1 text-xs font-semibold text-accent">
+                                    Receiver: {step.receiver_name || 'Not assigned yet'}
+                                  </p>
+                                  <p className="mt-1 text-xs text-slate">
+                                    Travel {formatDistanceKm(step.distance_from_previous_km)} from previous stop · total so far{' '}
+                                    {formatDistanceKm(step.cumulative_distance_km)}
+                                  </p>
+                                  <p className="mt-1 text-xs text-slate">Urgency signal {formatUrgency(step.hunger_score)}</p>
                                 </div>
                               </div>
-                            )
-                          })}
-                        </div>
-                      </div>
-                    ))}
+                              {linkedMission ? (
+                                <Link
+                                  to={`/app/missions/${linkedMission.id}`}
+                                  className="rounded-full border border-line bg-white px-3 py-1 text-xs font-semibold text-ink"
+                                >
+                                  Open mission
+                                </Link>
+                              ) : null}
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
                   </div>
                 </div>
               ) : null}
